@@ -80,6 +80,10 @@ def popup_input(title, prompt, default=""):
     Returns the user-entered string, or None if cancelled/empty.
     Works in both console and --noconsole modes.
     """
+    # Escape quotes for VBScript and replace newlines with vbCrLf
+    vbs_prompt = prompt.replace('"', '""').replace('\n', '" & vbCrLf & "')
+    vbs_title = title.replace('"', '""').replace('\n', '" & vbCrLf & "')
+    vbs_default = default.replace('"', '""').replace('\n', '" & vbCrLf & "')
     vbs_code = """
 result = InputBox("{}", "{}", "{}")
 If result = "" Then
@@ -87,7 +91,7 @@ If result = "" Then
 Else
     WScript.Echo result
 End If
-""".format(prompt.replace('"', '""'), title.replace('"', '""'), default.replace('"', '""'))
+""".format(vbs_prompt, vbs_title, vbs_default)
 
     vbs_path = None
     try:
@@ -343,40 +347,179 @@ def keep_awake(interval_seconds=60, until=None, silent=False):
 
 def prompt_for_params_popup():
     """
-    Show popup windows to ask user for interval, until-time, and confirm.
+    Show a single HTA dialog combining interval and until-time inputs.
     Returns (interval_seconds, until, silent).
+    If user cancels, exits the process.
     """
-    # Step 1: Interval
-    while True:
-        raw = popup_input("stay_awake - Interval", "Trigger interval in seconds\n(leave empty for default 60):", "60")
-        if raw is None or raw == "":
-            interval = 60
-            break
-        try:
-            interval = int(raw.strip())
-            if interval > 0:
-                break
-            popup_msg("Invalid Input", "Please enter a positive number.", MB_ICONWARNING)
-        except ValueError:
-            popup_msg("Invalid Input", "Please enter a valid number.", MB_ICONWARNING)
+    hta_code = r"""<!DOCTYPE html>
+<html>
+<head>
+<title>stay_awake - Configuration</title>
+<HTA:APPLICATION ID="StayAwakeConfig"
+    APPLICATIONNAME="stay_awake"
+    BORDER="dialog"
+    CAPTION="yes"
+    SHOWINTASKBAR="no"
+    SINGLEINSTANCE="yes"
+    SYSMENU="yes"
+    WINDOWSTATE="normal"
+    MAXIMIZEBUTTON="no"
+    MINIMIZEBUTTON="no"
+    WIDTH="150" HEIGHT="140">
+<style>
+body { font-family: 'Segoe UI', sans-serif; font-size: 18px; margin: 10px; }
+h3 { margin: 0 0 8px; color: #333; font-size: 20px; }
+.field-group { margin-bottom: 8px; }
+label { display: block; margin-bottom: 2px; color: #444; }
+input[type=text] { width: 100%%; padding: 6px 8px; border: 1px solid #aaa; border-radius: 4px; font-size: 18px; box-sizing: border-box; }
+.hint { font-size: 14px; color: #888; margin-top: 1px; }
+.btn-row { text-align: right; margin-top: 10px; }
+.btn-row button { padding: 6px 20px; margin-left: 6px; font-size: 16px; border: 1px solid #aaa; border-radius: 4px; cursor: pointer; }
+.btn-ok { background-color: #0078d7; color: #fff; border-color: #0078d7; }
+.btn-cancel { background-color: #f0f0f0; }
+.error { color: #d00; font-size: 12px; display: none; }
+</style>
+<script language=VBScript>
+Dim fso, ts, resultPath
+Set fso = CreateObject("Scripting.FileSystemObject")
+resultPath = "RESULT_FILE_PLACEHOLDER"
 
-    # Step 2: Until time
-    raw = popup_input("stay_awake - Lock Time", "Auto-lock time in HH:MM\n(leave empty for no auto-lock):\n\nCurrent params:\n  Interval: {} seconds".format(interval), "")
-    until = raw.strip() if raw and raw.strip() else None
+Function validateAndClose()
+    Dim intervalStr, untilStr, intervalNum
+    intervalStr = Trim(document.getElementById("interval").value)
+    untilStr = Trim(document.getElementById("until").value)
+    If intervalStr = "" Then intervalStr = "60"
+    If Not IsNumeric(intervalStr) Then
+        document.getElementById("intervalError").style.display = "block"
+        document.getElementById("intervalError").innerText = "Enter a valid number."
+        document.getElementById("interval").focus()
+        validateAndClose = False: Exit Function
+    End If
+    intervalNum = CInt(intervalStr)
+    If intervalNum <= 0 Then
+        document.getElementById("intervalError").style.display = "block"
+        document.getElementById("intervalError").innerText = "Enter a positive number."
+        document.getElementById("interval").focus()
+        validateAndClose = False: Exit Function
+    End If
+    If untilStr <> "" Then
+        Dim parts, h, m
+        parts = Split(untilStr, ":")
+        If UBound(parts) < 1 Or UBound(parts) > 2 Then
+            document.getElementById("untilError").style.display = "block"
+            document.getElementById("untilError").innerText = "Use HH:MM or HH:MM:SS."
+            document.getElementById("until").focus()
+            validateAndClose = False: Exit Function
+        End If
+        If Not IsNumeric(parts(0)) Or Not IsNumeric(parts(1)) Then
+            document.getElementById("untilError").style.display = "block"
+            document.getElementById("untilError").innerText = "Must be numbers."
+            document.getElementById("until").focus()
+            validateAndClose = False: Exit Function
+        End If
+        h = CInt(parts(0)): m = CInt(parts(1))
+        If h < 0 Or h > 23 Or m < 0 Or m > 59 Then
+            document.getElementById("untilError").style.display = "block"
+            document.getElementById("untilError").innerText = "HH:0-23, MM:0-59."
+            document.getElementById("until").focus()
+            validateAndClose = False: Exit Function
+        End If
+    End If
+    Set ts = fso.CreateTextFile(resultPath, True)
+    ts.WriteLine intervalStr
+    ts.WriteLine untilStr
+    ts.Close
+    window.Close()
+End Function
 
-    # Step 3: Confirm
-    confirm_msg = "stay_awake will start with:\n\n"
-    confirm_msg += "  Interval: {} seconds\n".format(interval)
-    if until:
-        confirm_msg += "  Auto-lock: {}\n".format(until)
-    else:
-        confirm_msg += "  Auto-lock: none\n"
-    confirm_msg += "\nClick Yes to start, No to cancel."
+Function cancelAndClose()
+    Set ts = fso.CreateTextFile(resultPath, True)
+    ts.WriteLine "CANCELLED"
+    ts.Close
+    window.Close()
+End Function
+</script>
+</head>
+<body>
+<h3>stay_awake settings</h3>
+<div class=field-group>
+<label for=interval>Trigger interval (seconds):</label>
+<input type=text id=interval value=60>
+<div class=hint>Leave empty for default 60s.</div>
+<div class=error id=intervalError></div>
+</div>
+<div class=field-group>
+<label for=until>Auto-lock time (optional):</label>
+<input type=text id=until value="" placeholder="e.g. 08:00">
+<div class=hint>HH:MM or HH:MM:SS. Leave empty for no auto-lock.</div>
+<div class=error id=untilError></div>
+</div>
+<div class=btn-row>
+<button class=btn-cancel onclick=cancelAndClose()>Cancel</button>
+<button class=btn-ok onclick=validateAndClose()>Start</button>
+</div>
+</body>
+</html>"""
 
-    if not popup_yesno("stay_awake - Confirm", confirm_msg):
+    # Create a unique temp file path for the result
+    result_fd, result_path = tempfile.mkstemp(suffix='.txt', prefix='stay_awake_result_')
+    os.close(result_fd)
+    
+    # Replace placeholder with actual result file path
+    final_hta = hta_code.replace("RESULT_FILE_PLACEHOLDER", result_path.replace("\\", "\\\\"))
+    
+    hta_file_path = None
+    try:
+        # Write HTA to a temp file
+        fd, hta_file_path = tempfile.mkstemp(suffix='.hta', prefix='stay_awake_')
+        os.close(fd)
+        with open(hta_file_path, 'w', encoding='utf-8') as f:
+            f.write(final_hta)
+
+        # Run mshta.exe (blocks until HTA window closes)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 1  # SW_SHOWNORMAL
+        
+        subprocess.run(
+            ['mshta.exe', hta_file_path],
+            capture_output=True, text=True, timeout=3600,
+            startupinfo=startupinfo
+        )
+
+        # Read the result file
+        if os.path.exists(result_path):
+            with open(result_path, 'r', encoding='utf-8') as f:
+                lines = [line.strip() for line in f.readlines() if line.strip()]
+            
+            if len(lines) >= 1 and lines[0] == "CANCELLED":
+                sys.exit(0)
+            elif len(lines) >= 1:
+                interval = int(lines[0])
+                until = lines[1] if len(lines) >= 2 and lines[1] else None
+                return interval, until, False
+        
+        # Fallback: user closed window without clicking any button
         sys.exit(0)
-
-    return interval, until, False
+        
+    except subprocess.TimeoutExpired:
+        popup_msg("Error", "Configuration dialog timed out.", MB_ICONWARNING)
+        sys.exit(1)
+    except Exception as e:
+        popup_msg("Error", "Failed to open configuration dialog:\n{}".format(str(e)), MB_ICONWARNING)
+        sys.exit(1)
+    finally:
+        # Clean up temp files
+        if hta_file_path and os.path.exists(hta_file_path):
+            try:
+                os.unlink(hta_file_path)
+            except:
+                pass
+        if os.path.exists(result_path):
+            try:
+                os.unlink(result_path)
+            except:
+                pass
 
 def main():
     """
